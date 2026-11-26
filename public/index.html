@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MergePay</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#14171c; --muted:#667085; --line:#e4e7ec; --ok:#12805c; --okbg:#e7f6ef; --warn:#b54708; --warnbg:#fef4e6; --bad:#b42318; --badbg:#fdecea; --accent:#1f4fd1; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  header { padding:20px 16px; border-bottom:1px solid var(--line); background:var(--card); }
+  header .wrap { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .wrap { max-width:760px; margin:0 auto; }
+  main.wrap { padding:20px 16px 60px; display:grid; gap:16px; }
+  h1 { font-size:20px; margin:0; letter-spacing:-.01em; } h1 span { color:var(--muted); font-weight:500; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
+  .title { font-size:17px; font-weight:600; margin:0 0 4px; }
+  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+  .muted { color:var(--muted); font-size:13px; }
+  .pill { display:inline-block; font-size:12px; font-weight:600; padding:2px 9px; border-radius:999px; background:var(--line); }
+  .pill.ok { background:var(--okbg); color:var(--ok); } .pill.warn { background:var(--warnbg); color:var(--warn); } .pill.bad { background:var(--badbg); color:var(--bad); }
+  .row { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; }
+  dl { display:grid; grid-template-columns:max-content 1fr; gap:6px 16px; margin:12px 0 0; }
+  dt { color:var(--muted); } dd { margin:0; overflow-wrap:anywhere; }
+  code { font:12.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button { font:inherit; font-weight:600; border:0; border-radius:8px; padding:9px 16px; cursor:pointer; background:var(--ink); color:#fff; }
+  button.secondary { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+  .msg { margin-top:12px; padding:10px 12px; border-radius:8px; font-size:14px; }
+  .msg.bad { background:var(--badbg); color:var(--bad); } .msg.warn { background:var(--warnbg); color:var(--warn); } .msg.ok { background:var(--okbg); color:var(--ok); }
+  .unavailable { font-weight:600; color:var(--muted); }
+  .receipt { border:2px solid var(--ok); }
+  .receipt .big { font-size:26px; font-weight:700; letter-spacing:-.02em; }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:s .7s linear infinite; vertical-align:-1px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+  @media (max-width:520px) { dl { grid-template-columns:1fr; gap:2px; } dd { margin-bottom:8px; } }
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>MergePay <span>· bounties paid on merge</span></h1><span class="muted" id="repo"></span></div></header>
+<main class="wrap">
+  <section class="card" id="issue"><h2>Bounty</h2><div class="muted"><span class="spin"></span> Reading issue via GitHub MCP…</div></section>
+  <section class="card" id="evidence"><h2>Merge evidence</h2><div class="muted"><span class="spin"></span> Reading pull request via GitHub MCP…</div></section>
+  <section class="card" id="wallet"><h2>Tangem wallet</h2><div class="muted"><span class="spin"></span> Connecting to Tangem MCP…</div></section>
+  <section class="card" id="payment"><h2>Payment</h2><div class="unavailable">Payment unavailable</div></section>
+  <section class="card receipt" id="receipt" hidden></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const fmt = (d) => d ? new Date(d).toLocaleString() : '—';
+const short = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : '';
+const S = { cfg: null, bounty: null, tangem: null, payment: null, busy: null, error: null };
+
+async function api(path, method = 'GET') {
+  const r = await fetch(path, { method });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+async function act(name, fn) {
+  S.busy = name; S.error = null; render();
+  try { await fn(); } catch (e) { S.error = { where: name, msg: e.message }; }
+  S.busy = null; render();
+}
+const errFor = (where) => S.error && S.error.where === where ? `<div class="msg bad">${esc(S.error.msg)}</div>` : '';
+const btn = (label, onclick, opts = {}) => `<button class="${opts.secondary ? 'secondary' : ''}" onclick="${onclick}" ${opts.disabled || S.busy ? 'disabled' : ''}>${S.busy === opts.busyKey ? '<span class="spin"></span> ' : ''}${label}</button>`;
+
+async function loadBounty() { S.bounty = await api('/api/bounty'); }
+async function loadTangem() { S.tangem = await api('/api/tangem'); }
+async function loadPayment() { S.payment = await api('/api/payment'); }
+
+window.checkAgain = () => act('check', loadBounty);
+window.connectTangem = () => act('connect', async () => {
+  await loadTangem();
+  if (S.tangem.authUrl) location.href = S.tangem.authUrl;
+});
+window.disconnectTangem = () => act('connect', async () => { await api('/api/tangem/disconnect', 'POST'); await loadTangem(); });
+window.prepare = () => act('prepare', async () => { S.payment = await api('/api/payment/prepare', 'POST'); });
+window.checkStatus = () => act('status', async () => { S.payment = await api('/api/payment/status', 'POST'); });
+window.discard = () => act('status', async () => { await api('/api/payment/discard', 'POST'); S.payment = null; });
+
+function renderIssue() {
+  const b = S.bounty, c = S.cfg;
+  if (!b) return;
+  const i = b.issue;
+  $('issue').innerHTML = `<h2>Bounty</h2>` + (i ? `
+    <p class="title"><a href="${esc(i.url)}" target="_blank">#${i.number} ${esc(i.title)}</a></p>
+    <div class="row"><span class="pill ${i.state === 'open' ? '' : 'ok'}">Issue ${esc(i.state)}</span>
+      <span><b>${esc(c.amountEth)} ETH</b> <span class="muted">(about $1) on ${esc(c.network)}</span></span></div>
+    <dl><dt>Repository</dt><dd>${esc(c.repo)}</dd><dt>Developer payout</dt><dd><code>${esc(c.payoutAddress)}</code></dd></dl>`
+    : `<div class="msg bad">${esc(b.problems.join(' '))}</div>`);
+}
+
+function renderEvidence() {
+  const b = S.bounty;
+  if (!b) return;
+  const p = b.pr;
+  let body = '';
+  if (!b.issue) body = `<div class="msg warn">No issue, so no evidence to check.</div>`;
+  else if (!p) body = `<div class="msg warn">${esc(b.problems.join(' ') || 'No linked pull request found.')}</div>`;
+  else {
+    const status = p.merged ? `<span class="pill ok">✓ Merged</span>` : p.state === 'closed' ? `<span class="pill bad">Closed without merge</span>` : `<span class="pill warn">Open, not merged yet</span>`;
+    body = `<p class="title"><a href="${esc(p.url)}" target="_blank">PR #${p.number} ${esc(p.title)}</a></p>
+      <div class="row">${status}</div>
+      <dl><dt>Author (developer)</dt><dd><a href="${esc(p.authorUrl)}" target="_blank">@${esc(p.author)}</a></dd>
+      ${p.merged ? `<dt>Merged by</dt><dd>${p.mergedBy ? '@' + esc(p.mergedBy) : '<span class="muted">not reported</span>'}</dd>
+      <dt>Merged at</dt><dd>${fmt(p.mergedAt)}</dd>${p.mergeCommit ? `<dt>Merge commit</dt><dd><code>${esc(p.mergeCommit.slice(0, 12))}</code></dd>` : ''}` : ''}</dl>`;
+  }
+  $('evidence').innerHTML = `<h2>Merge evidence</h2>${body}
+    <div class="actions">${btn('Check again', 'checkAgain()', { secondary: true, busyKey: 'check' })}</div>
+    <div class="muted" style="margin-top:8px">Read from GitHub MCP at ${fmt(b.checkedAt)}</div>${errFor('check')}`;
+}
+
+function renderWallet() {
+  const t = S.tangem;
+  if (!t) return;
+  let body;
+  if (t.error) body = `<div class="msg bad">${esc(t.error)}</div><div class="actions">${btn('Try again', 'connectTangem()', { busyKey: 'connect' })}</div>`;
+  else if (!t.connected) body = `<p>Connect MergePay to your Tangem wallet. Tangem's connection page shows a QR code. Scan it with the Tangem app and approve <b>MergePay</b> as a connected agent.</p>
+      <div class="actions">${btn('Connect Tangem', 'connectTangem()', { busyKey: 'connect' })}</div>`;
+  else body = `<div class="row"><span class="pill ok">✓ Connected</span><span class="muted">MergePay is a connected agent in your Tangem app</span></div>
+      ${t.walletError ? `<div class="msg warn">${esc(t.walletError)}</div>` : `<dl><dt>Pays from</dt><dd><code>${esc(t.fromAddress)}</code></dd>
+      <dt>ETH balance</dt><dd>${t.balance != null ? `<b>${t.balance.toFixed(6)} ETH</b>` : `<span class="muted">${esc(t.balanceError || 'unavailable')}</span>`}</dd></dl>
+      ${t.balance != null && t.balance < Number(S.cfg.amountEth) ? `<div class="msg warn">The balance is below the ${esc(S.cfg.amountEth)} ETH bounty plus gas.</div>` : ''}`}
+      <div class="actions">${btn('Refresh', 'connectTangem()', { secondary: true, busyKey: 'connect' })}${btn('Disconnect', 'disconnectTangem()', { secondary: true })}</div>`;
+  $('wallet').innerHTML = `<h2>Tangem wallet</h2>${body}${errFor('connect')}`;
+}
+
+function renderPayment() {
+  const p = S.payment, b = S.bounty, t = S.tangem;
+  const merged = b?.pr?.merged, connected = t?.connected && !t.walletError;
+  let body;
+  if (!p) {
+    if (!merged) body = `<div class="unavailable">Payment unavailable</div><div class="muted">The linked pull request must be merged first.</div>`;
+    else if (!connected) body = `<div class="unavailable">Payment unavailable</div><div class="muted">PR merged. Connect Tangem to pay the bounty.</div>`;
+    else body = `<p>PR #${b.pr.number} is merged. Request <b>${esc(S.cfg.amountEth)} ETH</b> to <code>${esc(short(S.cfg.payoutAddress))}</code> (@${esc(b.pr.author)}). The request goes to your phone. Nothing is sent until you approve it in the Tangem app.</p>
+      <div class="actions">${btn('Prepare payment', 'prepare()', { busyKey: 'prepare' })}</div>`;
+    body += errFor('prepare');
+  } else {
+    const st = p.status, chain = p.chain;
+    const pill = st === 'COMPLETED' ? (chain?.state === 'confirmed' ? 'ok' : 'warn') : st === 'CREATED' ? 'warn' : '';
+    body = `<div class="row"><span class="pill ${pill}">${esc(st)}</span>
+        <span class="muted">${st === 'CREATED' ? 'Waiting for your approval in the Tangem app' : st === 'COMPLETED' ? 'Signed in the Tangem app' : ''}</span></div>
+      <dl><dt>Amount</dt><dd>${esc(p.amountEth)} ETH on ${esc(p.network)}</dd>
+        <dt>From</dt><dd><code>${esc(p.fromAddress)}</code></dd><dt>To</dt><dd><code>${esc(p.toAddress)}</code></dd>
+        <dt>Request ID</dt><dd><code>${esc(p.intentId)}</code></dd>
+        ${p.deeplink ? `<dt>Open in Tangem</dt><dd><a href="${esc(p.deeplink)}">${esc(p.deeplink)}</a></dd>` : ''}
+        ${p.txHash ? `<dt>Transaction</dt><dd><a href="${esc(S.cfg.explorerTxUrl + p.txHash)}" target="_blank"><code>${esc(p.txHash)}</code></a></dd>
+        <dt>On-chain</dt><dd>${chain ? esc(chain.state) + (chain.blockNumber ? ` in block ${chain.blockNumber}` : '') : '—'}</dd>` : ''}
+        <dt>Requested</dt><dd>${fmt(p.requestedAt)}</dd>${p.checkedAt ? `<dt>Last checked</dt><dd>${fmt(p.checkedAt)}</dd>` : ''}</dl>
+      <div class="actions">${btn('Check status', 'checkStatus()', { busyKey: 'status' })}
+        ${!p.txHash ? btn('Discard request', 'discard()', { secondary: true }) : ''}</div>${errFor('status')}`;
+  }
+  $('payment').innerHTML = `<h2>Payment</h2>${body}`;
+}
+
+function renderReceipt() {
+  const p = S.payment, el = $('receipt');
+  if (!p || !p.txHash || p.chain?.state !== 'confirmed') { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<h2>Receipt</h2>
+    <div class="big">${esc(p.amountEth)} ETH paid</div>
+    <div class="muted">Confirmed on Ethereum in block ${p.chain.blockNumber}${p.chain.timestamp ? ' · ' + fmt(p.chain.timestamp) : ''}</div>
+    <dl><dt>Issue</dt><dd><a href="${esc(p.issue.url)}" target="_blank">#${p.issue.number} ${esc(p.issue.title)}</a></dd>
+      <dt>Merged PR</dt><dd><a href="${esc(p.pr.url)}" target="_blank">#${p.pr.number} ${esc(p.pr.title)}</a>, merged ${fmt(p.pr.mergedAt)}${p.pr.mergedBy ? ' by @' + esc(p.pr.mergedBy) : ''}</dd>
+      <dt>Developer</dt><dd><a href="${esc(p.pr.authorUrl)}" target="_blank">@${esc(p.pr.author)}</a> · <code>${esc(p.toAddress)}</code></dd>
+      <dt>Paid from</dt><dd><code>${esc(p.fromAddress)}</code> (Tangem, approved in app)</dd>
+      <dt>Transaction</dt><dd><a href="${esc(S.cfg.explorerTxUrl + p.txHash)}" target="_blank">View on Etherscan ↗</a></dd></dl>`;
+}
+
+function render() { renderIssue(); renderEvidence(); renderWallet(); renderPayment(); renderReceipt(); }
+
+(async () => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('tangemError')) S.error = { where: 'connect', msg: 'Tangem connection failed: ' + q.get('tangemError') };
+  if (q.has('tangem') || q.has('tangemError')) history.replaceState(null, '', '/');
+  S.cfg = await api('/api/config');
+  $('repo').textContent = S.cfg.repo;
+  await Promise.all([
+    loadBounty().catch((e) => { S.bounty = { problems: [e.message] }; }),
+    loadTangem().catch((e) => { S.tangem = { error: e.message }; }),
+    loadPayment().catch(() => {}),
+  ]);
+  render();
+})();
+</script>
+</body>
+</html>
